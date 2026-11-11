@@ -4,7 +4,7 @@ Status: implemented
 
 [English](2026-07-22-slot-type-chain-implementation.md) | 中文
 
-> 范围：Web 客户端 slot 体系的终版设计——UI 插件如何拼合页面、渲染权威落在哪里、组件 props 如何定型、业务活数据住在哪里。周边语境（装载链、对象层、服务）归 [Web 客户端架构 RFC](2026-07-19-gui-web-client-architecture.md) 所有，其 slot 各节移交本文。
+> 范围：Web 客户端 slot 体系的终版设计——UI 插件如何拼合页面、渲染权威落在哪里、组件 props 如何定型、业务活数据住在哪里。[Web 客户端参考](../../../../docs/subsystems/web-client.zh.md)说明周边的装载链、对象层与服务。
 
 ## 问题
 
@@ -12,11 +12,13 @@ Status: implemented
 
 ## 决策
 
-一句话：**壳只渲染 `'root'`；插件用单独一次 `register` 调用组合 UI——这一次调用同时占用 slot、声明并授权子 slot、声明 store、注入业务面；组件是纯函数，props 分四份额到达，每一份额都从各自唯一的真源自动推导。**
+全局主面板选择及其 root 生命周期由[全局主面板参考](../../../../packages/client/ui-layout/README.zh.md)定义。
+
+一句话：**ui-renderer 只渲染 `'root'`；插件用单独一次 `register` 调用组合 UI——这一次调用同时占用 slot、声明并授权子 slot、声明 store、注入业务面；组件是纯函数，props 分四份额到达，每一份额都从各自唯一的真源自动推导。**
 
 ### 'root' 是唯一的先验 slot
 
-`SlotRegistry`（client 运行时）在构造时声明 `'root'`——single/root、`owner: {}`——其 `SlotMap` 合并声明位于运行时包。壳的全部装配就是 `ctx.slots.renderSlot('root', {})`：唯一的 ctx 级渲染入口；传任何其他键、渲染器未安装、root 无人注册，一律大声失败（无 fallback）。
+`SlotRegistry`（client 运行时）在构造时声明 `'root'`——single/root、`owner: {}`——其 `SlotMap` 合并声明位于运行时包。ui-renderer 的全部装配就是 `ctx.slots.renderSlot('root', {})`：唯一的 ctx 级渲染入口；传任何其他键、渲染器未安装、root 无人注册，一律大声失败（无 fallback）。
 
 ### register 是唯一 API；children = 声明+授权+运行时 spec
 
@@ -25,7 +27,7 @@ ctx.slots.register({
   name: 'root',
   children: {
     'sidebar':      { kind: 'single', scope: 'root' },
-    'conversation': { kind: 'single', scope: 'session' },
+    'main':         { kind: 'keyed', scope: 'root' },
   },
   store: createLayoutStore,      // StoreHandle or factory (below)
   inject: injectFrame,           // business face (below)
@@ -36,7 +38,7 @@ ctx.slots.register({
 
 对等原则：**声明子 slot 的 entry 独占渲染这些子 slot 的权力**，全部在 register 时确定（配置错误会在装载时明确失败；渲染热路径不再校验）。装载即炸的情形：第二个 entry 声明已被声明的 slot；向未声明的 slot register；同一个 store 句柄挂到两个 scope 之下；chain 注册缺 `select`。
 
-激活顺序独立于声明条目的贡献方使用 `ctx.slots.inject(key, callback)`，并让直接调用 `register()` 继续大声失败。声明、贡献方、替换与失败各自的生命周期由 [slot 声明注入决策](2026-08-05-slot-declaration-injection.md) 规定。
+激活顺序独立于声明条目的贡献方使用 `ctx.slots.inject(key, callback)`，并让直接调用 `register()` 继续大声失败。声明、贡献方、替换与失败各自的生命周期由 [slot 声明注入决策](../../archived/architecture/2026-08-05-slot-declaration-injection.md) 规定。
 
 `SlotMap` 声明合并仍是类型权威，且 entry 只声明自己的轴加 **owner 份额**——注册方注入的 props 永不进入全局表（「谁注入的，类型归谁」）。
 
@@ -48,12 +50,13 @@ ctx.slots.register({
 | 子 slot 渲染 | `PropsRenderSlots<S>` | register 的 `children` 键集 | `renderSlot(key, owner)`，键参静态收窄到 S；chain 键另有 `renderSlotChain` |
 | store | `PropsStore<H>` | store 工厂的返回类型 | `useStore` selector 钩子 + `actions.*`（剥去 draft 形参） |
 | 业务 | `I` | inject 的返回类型 | 普通数据+回调；保留的 `hooks` 区域内，裸 observable 经绑定后以 `use<Name>` 选择器钩子的形式到达（`InjectFace<I>`） |
+| 按 kind | `MatchedShare` / `HocShare` | SlotMap entry 的 kind | chain 的 `matched`；hoc 的 `children`，即内一层或宿主内容 |
 
 凡声明 `scope: 'session'` 之处，`sessionId` 一律由框架供给——owner 传参不携带它。register 调用点是双重类型约束的收口：组件的 renderSlot 键集超出 `children` 声明、漏接某个已声明的面、store/inject 形状漂移，任何一条都在那一行上报编译错误。转授就是普通的 props 传递（把 `renderSlot` 函数递下去，可按需包一层更窄的签名）——不存在白名单面对象，也不存在铸面 API。
 
 ### chain kind：entry 自荐，首个匹配项负责渲染
 
-第四种 `SlotKind`——`'chain'`——把路由权相对 `keyed` 反转：keyed 的分派现场以 `entryKey` 点选占用 slot 的 entry，chain 则由 entry 自荐——owner 只分派一套格式统一的 owner props，永远不知道谁来接管，新的接管包注册进来 owner 零改动。chain 注册携带一个 `select` 纯选择器（`ChainSelect<O, M>`：`(owner) => matched | null`）与可选的 `priority`（升序；同值保持注册序 = 装配序——部署可控的 inject 拓扑——复用 list `order` 的同一稳定排序）；注册缺 `select` 即上文装载即炸情形之一。渲染时 outlet 按链序依次执行各 select：首个非 null 返回值当选，该值以 `matched` 并入组件 props（组件绝不自行重新推导匹配）；返回 `null` 则轮到下一个 entry；全 null 则渲染 owner 的 fallback 体（`ChainRenderOpts`）。
+第五种 kind `'hoc'` 把 entry 层层嵌套在 owner 提供的 `children` 外面，并像 `chain` 提供 `matched` 那样提供按 kind 的 `children` prop；其决策见 [hoc 插槽类型 Note](2026-11-03-hoc-slot-kind.zh.md)。第四种 `SlotKind`——`'chain'`——把路由权相对 `keyed` 反转：keyed 的分派现场以 `entryKey` 点选占用 slot 的 entry，chain 则由 entry 自荐——owner 只分派一套格式统一的 owner props，永远不知道谁来接管，新的接管包注册进来 owner 零改动。chain 注册携带一个 `select` 纯选择器（`ChainSelect<O, M>`：`(owner) => matched | null`）与可选的 `priority`（升序；同值保持注册序 = 装配序——部署可控的 inject 拓扑——复用 list `order` 的同一稳定排序）；注册缺 `select` 即上文装载即炸情形之一。渲染时 outlet 按链序依次执行各 select：首个非 null 返回值当选，该值以 `matched` 并入组件 props（组件绝不自行重新推导匹配）；返回 `null` 则轮到下一个 entry；全 null 则渲染 owner 的 fallback 体（`ChainRenderOpts`）。
 
 「不接」的判定住在 `select` 里，绝不在挂载后的组件里自探 props：组件为了渲染 null 也得先挂载，其钩子与 effect 全部白跑，随之而来的挂载/卸载抖动还会破坏 memo 化与 React key 语义；而选择器是纯函数——可单测、零挂载副作用——与「presentation methods are pure functions of `args`」是同一条纪律。纯，就是选择器的约定：不读外部可变状态、不产副作用，路由判定因此完全是 owner props 的函数，每次分派都可安全执行。选择器只做路由，绝不创建新对象——按分派逐次构造对象会让引用每次渲染都换新；把匹配值包成更丰富的面这件事，发生在当选组件内部（以 `matched` 为依赖的 `useMemo`）。
 
@@ -61,7 +64,7 @@ ctx.slots.register({
 
 ### store 席位：引擎归框架，schema 归注册方
 
-框架只拥有一套订阅机制：快照 store 引擎（zustand vanilla + immer + 可选 localStorage 持久化）住 **运行时包**（`./client` 主出口——无子路径），产出裸的可观察源；web-react 在 outlet 处把它们绑定成钩子（按源缓存的 uSES 绑定）。store 里*装什么*是注册方的声明，且必须写成工厂函数，使模块级句柄根本无从存在（模块级句柄会成为跨插件重载存活的事实单例）：
+框架只拥有一套订阅机制：快照 store 引擎（zustand vanilla + immer + 可选 localStorage 持久化）住 **运行时包**（`./client` 主出口——无子路径），产出裸的可观察源；ui-renderer 在 outlet 处把它们绑定成钩子（按源缓存的 uSES 绑定）。store 里*装什么*是注册方的声明，且必须写成工厂函数，使模块级句柄根本无从存在（模块级句柄会成为跨插件重载存活的事实单例）：
 
 ```ts ignore-check
 export function createChatStore() {
@@ -92,7 +95,7 @@ inject 工厂只接收其声明所授权的形参——session slot 获得 `sess
 
 `SessionProvider` 是框架组件，**以标配席位形式送达**：`children` 里声明了 session scope slot 的 entry 经 prop 收到它（类型住 ui-slots，值由渲染器注入）——组件永不对它做值 import。它框架自接线（内部自读运行时的当前会话状态，装配方零传参），render-prop 形——`children(sessionId)` 外加 `empty` 分支，以 `key={sessionId}` 重挂。`BindingContext` 属机械内部；业务组件可见的 React Context 为零。inject 工厂有意在 outlet 内部执行（per-entry 错误边界接得住它们；崩溃的注册方只黑掉自己那一格，装配错误则重抛）；outlet 将树上下文作为仅供框架机制使用的隐式参数读取——即「身份出自 register 闭包、现场出自树位置」的分工。
 
-渲染位于一份安装约定之后，因此运行时不依赖 React：`SlotRenderer`（接口住 ui-slots，实现 `createSlotRenderer()` 住 web-react）在壳 boot 时经 `ctx.slots.install(...)` 安装一次；双重安装与安装前渲染均 throw。归属记账是服务里的单一 `Map<key, entry>`——账本、slot、贡献、渲染绑定、store 实例全部沿同一条 entry 轴生灭，跨插件重载的陈旧权威窗口由此在构造上关闭（已 dispose 的 entry 所捕获的 `renderSlot`，一进入口即抛陈旧授权（stale-authorization）错误）。
+渲染位于一份安装约定之后，因此运行时不依赖 React：`SlotRenderer`（接口住 ui-slots，实现 `createSlotRenderer()` 住 ui-renderer）在壳 boot 时经 `ctx.slots.install(...)` 安装一次；双重安装与安装前渲染均 throw。归属记账是服务里的单一 `Map<key, entry>`——账本、slot、贡献、渲染绑定、store 实例全部沿同一条 entry 轴生灭，跨插件重载的陈旧权威窗口由此在构造上关闭（已 dispose 的 entry 所捕获的 `renderSlot`，一进入口即抛陈旧授权（stale-authorization）错误）。
 
 ### 类型链实现裁定
 
